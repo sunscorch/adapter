@@ -1,0 +1,4 @@
+
+pymodbus
+requests
+schedule
