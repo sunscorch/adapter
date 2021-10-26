@@ -4,28 +4,30 @@
 from pymodbus.client.sync import ModbusSerialClient
 from typing import Final
 import logging
-from logging import handlers
 import os
 from logging.handlers import TimedRotatingFileHandler
-from logging.handlers import RotatingFileHandler
 import re
 import json
-import time
 from collections import OrderedDict
-import traceback
 import sys
 import requests
-import sched, time
+import time
 import schedule
+import base64
+
 
 offset: Final = 32
 start_addr: Final = 5
 slave_id: Final = 1
-trigger_time: Final = 30
+trigger_time: Final = 3
 heartbeat_trigger_time: Final = 25
-top_server_url: Final = "http://127.0.0.1:8080/api/v1/measvalue-ai/"
+top_server_url: Final = "http://127.0.0.1:80/api/v1/measvalue-ai/"
 top_server_login_url = "http://127.0.0.1:80/api/v1/login"
 top_server_heartbeat_url = "http://127.0.0.1:80/api/v1/heartbeat"
+
+adapter_address = "2"
+adapter_usr = "2"
+adpater_pwd = "123"
 login_json: Final = json.loads('{"address":"2","userName":"user", "pwd":"MTIz"}')
 
 conf_mp = OrderedDict()
@@ -76,10 +78,10 @@ def setup_log(log_name):
 
 
 class AoObj:
-    def __init__(self, objectId, cv, time):
+    def __init__(self, objectId, cv, cur_time):
         self.objectId = objectId
         self.cv = cv
-        self.time = time
+        self.time = cur_time
 
     def __str__(self):
         return "[" + str(self.objectId) + ":" + str(self.cv) + "]"
@@ -95,22 +97,23 @@ def combineDigit2Hex(l):
     return s
 
 
-def procress_gas_name(l):
+def process_gas_name(l):
     res = ""
+    i = 0
     for elem in l:
+        i = i+1
         # 读取每个寄存器的hex， 然后分割处每个 byte 处理, 转ascii ，00 跳过
         # eg 43 4f 00 00 00 00 => CO
         hex_str = "{0:0{1}X}".format(elem, 4)
-        print(hex_str)
-        if (hex_str == "0000"):
+        logger.info("gas name processing , process {} register, hex str is {} ".format(i, hex_str))
+        if hex_str == "0000":
             continue
         else:
             first_byte = hex_str[0:2]
-            print("first byte str is" + first_byte)
-            if (first_byte == "00"):
-                continue
-            res += chr(int(first_byte, 16))
-            print("first_byte is {}".format(int(first_byte, 16)))
+            logger.info("first byte str is " + first_byte)
+            if first_byte != "00":
+                res += chr(int(first_byte, 16))
+            logger.info("first_byte is {}".format(int(first_byte, 16)))
             second_byte = hex_str[2:]
             if (second_byte == "00"):
                 continue
@@ -147,11 +150,11 @@ def get_cv_each_addr(address):
             "process gas value channel address{}, id is {}".format(address, (address - start_addr) / offset + 1))
         if not res.isError():
             v = combineDigit2Hex(res.registers)
-            logger.info("adrress is {0}, channel id is {1}, gas original value is {2}".format(address, (
+            logger.info("address is {}, channel id is {}, gas original value is {}".format(address, (
                     address - start_addr) / offset + 1, v))
         else:
             logger.error("fail to get gas original value from address {}， error:{}".format(address, res))
-        # 处理放大你倍数
+        # 处理放大倍数
         res = client.read_holding_registers(address=address + 6, count=1, unit=slave_id)
         # print(combineDigit2Hex(res))
         logger.info(
@@ -166,29 +169,29 @@ def get_cv_each_addr(address):
     else:
         logger.error('Cannot connect to the Modbus Server/Slave')
     client.close()
-    if (v != None and n != None):
+    if v is not None and n is not None:
         cv = v / amplify_mp[n]
         logger.info("final gas res =  {}".format(cv))
     return cv
 
 
-# address, the first address stores gas name,  6 bytes offest in all
+# address, the first address stores gas name,  6 bytes offset in all
 # 传入气体名称首地址 处理
 def get_gas_name(address):
     res = ""
     if client.connect():  # Trying for connect to Modbus Server/Slave
-        res = client.read_holding_registers(address=address, count=6, unit=slave_id)
+        res = client.read_holding_registers(address=address, count=3, unit=slave_id)
         # print(combineDigit2Hex(res))
         logger.info("process gas name address {} ".format(address))
         if not res.isError():
-            v = procress_gas_name(res.registers)
+            v = process_gas_name(res.registers)
             res = v
-            logger.info("gas original value is ".format(address, (address - start_addr) / offset + 1))
+            logger.info("gas original value is {}".format(res))
         else:
             logger.error("fail to get gas original value from address {}， error:{}".format(address, res))
         client.close()
-        print("gas name is " + v)
-        return v
+        print("gas name is " + res)
+        return res
 
 
 def get_n_byte_data(address, n):
@@ -207,14 +210,29 @@ def get_n_byte_data(address, n):
 
 
 def probe(n):
-    for i in range(n):
+    f = open("channelInfo.csv", "w")
+    try:
+        csv_header = ["id", "gas_value", "gas_name", "amplify_value", "gas_unit", "low_warning_threshold",
+                      "high_warning_threshold"]
+        f.writelines(",".join(csv_header) + "\n")
         start_addr_cur = start_addr
-        gas_name_addr = start_addr_cur + 3
-        gas_name = get_gas_name(gas_name_addr)
-        gas_unit = get_n_byte_data(start_addr_cur + 7)
-        low_warning_theshold = get_n_byte_data(start_addr_cur + 8, 1)
-        high_warning_threshold = get_n_byte_data(start_addr_cur + 9, 1)
-        start_addr_cur += offset
+        for i in range(n):
+            gas_value = get_n_byte_data(start_addr_cur, 2)
+            gas_name_addr = start_addr_cur + 3
+            gas_name = get_gas_name(gas_name_addr)
+            amplify_value = get_n_byte_data(start_addr_cur + 6, 1)
+            gas_unit = get_n_byte_data(start_addr_cur + 7, 1)
+            low_warning_threshold = get_n_byte_data(start_addr_cur + 8, 2)
+            high_warning_threshold = get_n_byte_data(start_addr_cur + 10, 2)
+            start_addr_cur += offset
+            csv_value = [str(i + 1), str(gas_value), str(gas_name), str(amplify_value), str(gas_unit),
+                         str(low_warning_threshold),
+                         str(high_warning_threshold)]
+            f.writelines(",".join(csv_value) + "\n")
+    except Exception:
+        logger.error(u'Failed to generate channel info file', exc_info=True)
+    finally:
+        f.close()
 
 
 def collect_modbus_data():
@@ -274,10 +292,12 @@ def heartbeat():
         r = requests.post(top_server_heartbeat_url, headers=headers, json=token_json)
         logger.info("heartbeat response is {}".format(r.text))
         msg = json.loads(r.text).get('msg')
-        if (msg == None):
+        token = msg
+        if msg is None:
+            token = None
             logger.error("fail to send heartbeat to server")
         else:
-            logger.error("succeed to send heartbeat to server")
+            logger.info("succeed to send heartbeat to server")
     except Exception as e:
         logger.error(u'Failed to send out heartbeat....', exc_info=True)
 
@@ -292,19 +312,18 @@ def login():
 
 
 def main(argv):
-    s = sched.scheduler(time.time, time.sleep)  # 生成调度器
     print("===========")
     logger.info(argv[0])
     logger.info(argv[1])
     mode = argv[1]
-    if (mode == "init"):
-        if (len(argv) != 3):
+    if mode == "init":
+        if len(argv) != 3:
             print("pls end channel number")
             logger.error("pls end channel number")
             sys.exit()
-        n = argv[2]
+        n = int(argv[2])
         probe(n)
-    elif (mode == "daemon"):
+    elif mode == "daemon":
         global heartbeat_trigger_time
         logger.info("we are in daemon mode")
         read_obj_id()
@@ -318,7 +337,7 @@ def main(argv):
         logger.error("invalid args")
 
 
-logger = setup_log("adapterlog.log")
+logger = setup_log("adapterLog.log")
 logger.info("start up the adapter...")
 
 if __name__ == "__main__":
