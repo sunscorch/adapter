@@ -1,3 +1,1 @@
-@echo off
-pythonw modbusTest.py daemon
-exit
+pip install --no-index --find-links=./ -r requirements.txt

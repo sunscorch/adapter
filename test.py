@@ -11,5 +11,5 @@ client = ModbusSerialClient(
     bytesize=8
 )
 
-res = client.read_holding_registers(address=5, count=2, unit=1)
-print(res.registers)
+res = client.read_holding_registers(address=5, count=16, unit=1)
+print(res)
