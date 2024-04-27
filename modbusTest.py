@@ -18,7 +18,7 @@ import base64
 offset: Final = 32
 start_addr: Final = 5
 slave_id: Final = 1
-trigger_time: Final = 3
+trigger_time: Final = 5
 heartbeat_trigger_time: Final = 25
 top_server_url: Final = "http://127.0.0.1:80/api/v1/measvalue-ai/"
 top_server_alarm_url: Final = "http://127.0.0.1:80/api/v1/new-alarms/"
@@ -154,15 +154,10 @@ class AlarmEvent:
 # alarm1 = AlarmEvent(alarmID=1, alarmName="High Temperature", objTypeID=101, alarmTypeID=201, time=1648761600, objectId=1,
 # alarmSeverity=2, acked=True, ackTime=1648761700, ackResult=1, cleared=False)
 
-
-def combineDigit2Hex(l):
-    s = 0
-    for elem in l:
-        # convert to hex 为每个寄存器补全4位
-        hex_num = int("{0:#0{1}X}".format(elem, 4), 16)
-        s = s * 16 * 16 * 16 * 16 + hex_num
-    print(s)
-    return s
+#l 是长度为2 的array
+def combineDigit2Hex(hex_list):
+    combined_value = (hex_list[0] << 16) | hex_list[1]
+    return combined_value
 
 
 def process_gas_name(hex_values):
@@ -203,10 +198,7 @@ def read_obj_id():
     print(conf_mp)
 
 
-def peocess_alarm(channel, alarm_status, cv):
-    gas_name = threshold_dict[channel][2]
-    low = threshold_dict[channel][0]
-    high = threshold_dict[channel][1]
+def peocess_alarm(channel, alarm_status, cv, low, high,gas_name):
 
     objid = conf_mp[channel]
     if alarm_status == 0:
@@ -233,21 +225,26 @@ def get_cv_each_addr(address, channel):
         logger.info(
             "process gas value channel address {}, channel id is {}".format(address, channel))
         if not res.isError():
+
+            reg = res.registers
             # 获取气体浓度数组 为数组的1,2位
-            concentration_arr = [res.registers[0], res.registers[1]]
+            concentration_arr = [reg[0], reg[1]]
             v = combineDigit2Hex(concentration_arr)
             logger.info("address is {}, channel id is {}, gas original value is {}".format(address, (
                     address - start_addr) / offset + 1, v))
 
             # 处理放大倍数
-            amplify_num = res.registers[5]
+            amplify_num = reg[5]
             # 放大倍数为10^N次方
             amplify_num = 10 ** amplify_num
 
-            alarm_status = res.registers[2]
+            alarm_status = reg[2]
 
             cv = v / amplify_num
-            peocess_alarm(channel, alarm_status, cv)
+            low_warning_threshold = combineDigit2Hex([reg[8], reg[9]])
+            high_warning_threshold = combineDigit2Hex([reg[10], reg[11]])
+            gas_name = process_gas_name([reg[3], reg[4], reg[5]])
+            peocess_alarm(channel, alarm_status, cv, low_warning_threshold, high_warning_threshold,gas_name)
             logger.info("final gas res =  {}".format(cv))
             return cv
         else:
@@ -258,6 +255,7 @@ def get_cv_each_addr(address, channel):
     client.close()
 
 
+'''
 # address, the first address stores gas name,  6 bytes offset in all
 # 传入气体名称首地址 处理
 def get_gas_name(address):
@@ -275,6 +273,7 @@ def get_gas_name(address):
         client.close()
         print("gas name is " + res)
         return res
+'''
 
 
 def get_n_byte_data(address, n):
@@ -362,9 +361,7 @@ def probe(n):
     except Exception:
         logger.error(u'Failed to generate channel info file', exc_info=True)
     finally:
-        if len(threshold_dict) > 0:
-            with open('example.pkl', 'wb') as file:
-                pickle.dump(threshold_dict, file)
+
         f.close()
 
 
@@ -413,7 +410,6 @@ def collect_modbus_data():
             global top_server_alarm_url
             response = requests.post(top_server_alarm_url, headers=headers, json=new_data)
             logger.info(response.text)
-
 
         except Exception as e:
             logger.error(u'Failed to send out data to top server', exc_info=True)
@@ -471,9 +467,7 @@ def main(argv):
         probe(n)
     elif mode == "daemon":
         global heartbeat_trigger_time
-        with open('example.pkl', 'rb') as file:
-            global threshold_dict
-            threshold_dict = pickle.load(file)
+
         logger.info("we are in daemon mode")
         read_obj_id()
         schedule.every(heartbeat_trigger_time).seconds.do(heartbeat)
