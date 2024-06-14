@@ -15,9 +15,10 @@ import time
 import schedule
 import base64
 
+serial_port_name: Final = 'com3'
 offset: Final = 32
 start_addr: Final = 5
-slave_id: Final = 1
+# slave_id: Final = 1
 trigger_time: Final = 5
 heartbeat_trigger_time: Final = 25
 top_server_url: Final = "http://127.0.0.1:80/api/v1/measvalue-ai/"
@@ -66,7 +67,7 @@ token = None
 
 client = ModbusSerialClient(
     method='rtu',
-    port='com3',
+    port=serial_port_name,
     baudrate=9600,
     timeout=3,
     parity='N',
@@ -154,7 +155,7 @@ class AlarmEvent:
 # alarm1 = AlarmEvent(alarmID=1, alarmName="High Temperature", objTypeID=101, alarmTypeID=201, time=1648761600, objectId=1,
 # alarmSeverity=2, acked=True, ackTime=1648761700, ackResult=1, cleared=False)
 
-#l 是长度为2 的array
+# l 是长度为2 的array
 def combineDigit2Hex(hex_list):
     combined_value = (hex_list[0] << 16) | hex_list[1]
     return combined_value
@@ -189,18 +190,14 @@ def read_obj_id():
     f.close()
 
     global conf_mp
-    for elem in conf_json:
-        k = elem["channel"]
-        v = elem["objid"]
-        conf_mp[k] = v
+    conf_mp = conf_json
     # scheduler_object.get_job(job_id ="my_job_id").modify(next_run_time=datetime.datetime.now())
     print("conf_mp is ")
     print(conf_mp)
 
 
-def peocess_alarm(channel, alarm_status, cv, low, high,gas_name):
+def peocess_alarm(channel, alarm_status, cv, low, high, gas_name, objid):
 
-    objid = conf_mp[channel]
     if alarm_status == 0:
         return
     alarm_name = gas_name + ("高报警" if alarm_status == 2 else "高报警")
@@ -214,7 +211,7 @@ def peocess_alarm(channel, alarm_status, cv, low, high,gas_name):
     alarm_list.append(alarm)
 
 
-def get_cv_each_addr(address, channel):
+def get_cv_each_addr(address, channel, slave_id, objid):
     v = None
     n = None
     cv = None
@@ -244,7 +241,7 @@ def get_cv_each_addr(address, channel):
             low_warning_threshold = combineDigit2Hex([reg[8], reg[9]])
             high_warning_threshold = combineDigit2Hex([reg[10], reg[11]])
             gas_name = process_gas_name([reg[3], reg[4], reg[5]])
-            peocess_alarm(channel, alarm_status, cv, low_warning_threshold, high_warning_threshold,gas_name)
+            peocess_alarm(channel, alarm_status, cv, low_warning_threshold, high_warning_threshold, gas_name, objid)
             logger.info("final gas res =  {}".format(cv))
             return cv
         else:
@@ -255,72 +252,8 @@ def get_cv_each_addr(address, channel):
     client.close()
 
 
-'''
-# address, the first address stores gas name,  6 bytes offset in all
-# 传入气体名称首地址 处理
-def get_gas_name(address):
-    res = ""
-    if client.connect():  # Trying for connect to Modbus Server/Slave
-        res = client.read_holding_registers(address=address, count=3, unit=slave_id)
-        # print(combineDigit2Hex(res))
-        logger.info("process gas name address {} ".format(address))
-        if not res.isError():
-            v = process_gas_name(res.registers)
-            res = v
-            logger.info("gas original value is {}".format(res))
-        else:
-            logger.error("fail to get gas original value from address {}， error:{}".format(address, res))
-        client.close()
-        print("gas name is " + res)
-        return res
-'''
-
-
-def get_n_byte_data(address, n):
-    res = None
-    if client.connect():  # Trying for connect to Modbus Server/Slave
-        res = client.read_holding_registers(address=address, count=n, unit=slave_id)
-        logger.info("process  address {} ".format(address))
-        if not res.isError():
-            v = combineDigit2Hex(res.registers)
-            res = v
-            logger.info("value is {}".format(res))
-        else:
-            logger.error("fail to  value from address {}， error:{}".format(address, res))
-        client.close()
-        return res
-
-
-'''
-def probe(n):
-    f = open("channelInfo.csv", "w")
-    try:
-        csv_header = ["id", "gas_value", "gas_name", "amplify_value", "gas_unit", "low_warning_threshold",
-                      "high_warning_threshold"]
-        f.writelines(",".join(csv_header) + "\n")
-        start_addr_cur = start_addr
-        for i in range(n):
-            gas_value = get_n_byte_data(start_addr_cur, 2)
-            gas_name_addr = start_addr_cur + 3
-            gas_name = get_gas_name(gas_name_addr)
-            amplify_value = get_n_byte_data(start_addr_cur + 6, 1)
-            gas_unit = get_n_byte_data(start_addr_cur + 7, 1)
-            low_warning_threshold = get_n_byte_data(start_addr_cur + 8, 2)
-            high_warning_threshold = get_n_byte_data(start_addr_cur + 10, 2)
-            start_addr_cur += offset
-            csv_value = [str(i + 1), str(gas_value), str(gas_name), str(amplify_value), str(gas_unit),
-                         str(low_warning_threshold),
-                         str(high_warning_threshold)]
-            f.writelines(",".join(csv_value) + "\n")
-    except Exception:
-        logger.error(u'Failed to generate channel info file', exc_info=True)
-    finally:
-        f.close()
-'''
-
-
-def probe(n):
-    f = open("channelInfo.csv", "w")
+def probe(n, slave_id):
+    f = open(f"channelInfo{slave_id}.csv", "w")
     try:
         csv_header = ["id", "gas_value", "gas_name", "amplify_value", "low_warning_threshold",
                       "high_warning_threshold"]
@@ -375,11 +308,14 @@ def collect_modbus_data():
         if len(conf_mp) == 0:
             logger.error("please set up the conf.json first")
             sys.exit()
-        for channel, objid in conf_mp.items():
-            print([channel, objid])
+        for item in conf_mp:
+            slave_id, channel, objid = item['slave_id'], item['channel'], item['objid']
+            print([slave_id, channel, objid])
             cv = None
+            start_addr_cur = start_addr + (channel - 1) * offset
             try:
-                cv = get_cv_each_addr(start_addr_cur, channel)
+
+                cv = get_cv_each_addr(start_addr_cur, channel, slave_id, objid)
             except Exception:
                 logger.error(u'Failed to get cv data at address {}'.format(start_addr_cur), exc_info=True)
 
@@ -387,7 +323,7 @@ def collect_modbus_data():
             if cv is not None:
                 data = AoObj(objid, cv, cur_time)
                 max_view_send_list.append(data)
-            start_addr_cur += offset
+            #start_addr_cur += offset
 
     except Exception as e:
         logger.error(u'Failed to get cv data at address {}'.format(start_addr_cur), exc_info=True)
@@ -459,12 +395,13 @@ def main(argv):
     logger.info(argv[1])
     mode = argv[1]
     if mode == "init":
-        if len(argv) != 3:
+        if len(argv) != 4:
             print("pls end channel number")
             logger.error("pls end channel number")
             sys.exit()
         n = int(argv[2])
-        probe(n)
+        slave_id = int(argv[3])
+        probe(n, slave_id)
     elif mode == "daemon":
         global heartbeat_trigger_time
 

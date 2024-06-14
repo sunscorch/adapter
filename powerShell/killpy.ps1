@@ -10,5 +10,8 @@ Else
 echo "killing"
 taskkill.exe /F /PID $(Get-WmiObject Win32_Process -Filter "name = 'pythonw.exe'" | Where-Object {$_.CommandLine -Match 'modbusTest.py'} | Select -ExpandProperty ProcessId)
 
-
 }
+
+echo "the adapter is going to start in the backend"
+pythonw modbusTest.py daemon
+echo "the adapter is started successfully"
